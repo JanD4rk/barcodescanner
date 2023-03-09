@@ -44,9 +44,9 @@ class GraphicOverlay(context: Context, attrs: AttributeSet) : View(context, attr
     private val lock = Any()
 
     private var previewWidth: Int = 0
-    private var widthScaleFactor = 1.0f
+    public var widthScaleFactor = 1.0f
     private var previewHeight: Int = 0
-    private var heightScaleFactor = 1.0f
+    public var heightScaleFactor = 1.0f
     private val graphics = ArrayList<Graphic>()
 
 

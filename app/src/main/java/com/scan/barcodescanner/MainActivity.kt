@@ -5,10 +5,14 @@ import android.animation.ValueAnimator
 import android.annotation.SuppressLint
 import android.content.pm.PackageManager
 import android.graphics.RectF
+import android.opengl.Visibility
 import androidx.appcompat.app.AppCompatActivity
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.util.Size
+import android.view.View
 import android.widget.Toast
 import androidx.camera.camera2.internal.compat.workaround.TargetAspectRatio
 import androidx.camera.core.*
@@ -29,13 +33,14 @@ private const val CAMERA_PERMISSION_REQUEST_CODE = 1
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private lateinit var  cameraReticleAnimator: CameraReticleAnimator
+    private lateinit var cameraReticleAnimator: CameraReticleAnimator
+    private var isLocked = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-        cameraReticleAnimator= CameraReticleAnimator(binding.overlay)
+        cameraReticleAnimator = CameraReticleAnimator(binding.overlay)
         if (hasCameraPermission()) bindCameraUseCases()
         else requestPermission()
     }
@@ -80,7 +85,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun bindCameraUseCases() {
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
 
@@ -93,48 +97,36 @@ class MainActivity : AppCompatActivity() {
 
                 }
 
-            // configure our MLKit BarcodeScanning client
 
-            /* passing in our desired barcode formats - MLKit supports additional formats outside of the
-            ones listed here, and you may not need to offer support for all of these. You should only
-            specify the ones you need */
             val options = BarcodeScannerOptions.Builder().setBarcodeFormats(
                 Barcode.FORMAT_QR_CODE,
             ).build()
 
-            // getClient() creates a new instance of the MLKit barcode scanner with the specified options
             val scanner = BarcodeScanning.getClient(options)
 
-            // setting up the analysis use case
-            val analysisUseCase = ImageAnalysis.Builder().setTargetAspectRatio(AspectRatio.RATIO_16_9)
-                .build()
+            val analysisUseCase =
+                ImageAnalysis.Builder().setTargetAspectRatio(AspectRatio.RATIO_16_9)
+                    .build()
 
-
-            // define the actual functionality of our analysis use case
             analysisUseCase.setAnalyzer(Executors.newSingleThreadExecutor()) {
                 processImageProxy(scanner, it)
             }
 
-
-            // configure to use the back camera
             val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
             try {
-               var camera= cameraProvider.bindToLifecycle(
+              cameraProvider.bindToLifecycle(
                     this,
                     cameraSelector,
                     previewUseCase,
                     analysisUseCase
                 )
 
-                binding.overlay.setCameraInfo(previewUseCase.resolutionInfo?.resolution)
-//                Log.e(TAG, "bindCameraUseCases3: ${previewUseCase.resolutionInfo} ${previewUseCase.resolutionInfo?.resolution}" )
+//                binding.overlay.setCameraInfo(previewUseCase.resolutionInfo?.resolution)
 
             } catch (illegalStateException: IllegalStateException) {
-                // If the use case has already been bound to another lifecycle or method is not called on main thread.
                 Log.e(TAG, illegalStateException.message.orEmpty())
             } catch (illegalArgumentException: IllegalArgumentException) {
-                // If the provided camera selector is unable to resolve a camera to be used for the given use cases.
                 Log.e(TAG, illegalArgumentException.message.orEmpty())
             }
         }, ContextCompat.getMainExecutor(this))
@@ -144,7 +136,6 @@ class MainActivity : AppCompatActivity() {
         barcodeScanner: BarcodeScanner,
         imageProxy: ImageProxy
     ) {
-
         imageProxy.image?.let { image ->
             val inputImage =
                 InputImage.fromMediaImage(
@@ -153,26 +144,17 @@ class MainActivity : AppCompatActivity() {
                 )
             barcodeScanner.process(inputImage)
                 .addOnSuccessListener { barcodeList ->
+                    if (isLocked) return@addOnSuccessListener //<--return here
                     val barcode = barcodeList.getOrNull(0)
-                    nese(binding.overlay,barcodeList)
 
+                    addOverlay(binding.overlay, barcode)
                     // `rawValue` is the decoded value of the barcode
                     barcode?.rawValue?.let { value ->
                         binding.bottomText.text =
                             getString(R.string.barcode_value, value)
                     }
                 }
-                .addOnFailureListener {
-                    // This failure will happen if the barcode scanning model
-                    // fails to download from Google Play Services
-
-                    Log.e(TAG, it.message.orEmpty())
-                }.addOnCompleteListener {
-                    // When the image is from CameraX analysis use case, must
-                    // call image.close() on received images when finished
-                    // using them. Otherwise, new images may not be received
-                    // or the camera may stall.
-
+                .addOnCompleteListener {
                     imageProxy.image?.close()
                     imageProxy.close()
                 }
@@ -184,59 +166,29 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-    fun nese(graphicOverlay:GraphicOverlay, results:List<Barcode>) {
-        Log.e(TAG, "processImageProxy: " + results.size)
-        val barcodeInCenter = results.firstOrNull { barcode ->
-            val boundingBox = barcode.boundingBox ?: return@firstOrNull false
-            val box = graphicOverlay.translateRect(boundingBox)
-            Log.e(TAG, "processImageProxy: box:${box}")
-
-            Log.e(TAG, "processImageProxy: x:${graphicOverlay.width /2f} y:${graphicOverlay.height/2f}")
-            box.contains(graphicOverlay.width / 2f, graphicOverlay.height / 2f)
-        }
-        Log.e(TAG, "processImageProxy2:  ${barcodeInCenter == null}")
-
-
+    fun addOverlay(graphicOverlay: GraphicOverlay, result:Barcode?) {
         graphicOverlay.clear()
-        if (barcodeInCenter == null) {
+        if (result == null) {
             cameraReticleAnimator.start()
             graphicOverlay.add(BarcodeReticleGraphic(graphicOverlay, cameraReticleAnimator))
-//            workflowModel.setWorkflowState(WorkflowState.DETECTING)
         } else {
+            isLocked=true
             cameraReticleAnimator.cancel()
-            val sizeProgress = getProgressToMeetBarcodeSizeRequirement(
-                graphicOverlay,
-                barcodeInCenter
-            )
-            if (sizeProgress < 1) {
-                // Barcode in the camera view is too small, so prompt user to move camera closer.
-                graphicOverlay.add(BarcodeConfirmingGraphic(graphicOverlay, barcodeInCenter))
-//                workflowModel.setWorkflowState(WorkflowState.CONFIRMING)
-            } else {
-                // Barcode size in the camera view is sufficient.
-                if (true) {
-                    val loadingAnimator = createLoadingAnimator(graphicOverlay)
-                    loadingAnimator.start()
-                    graphicOverlay.add(BarcodeLoadingGraphic(graphicOverlay, loadingAnimator))
-//                    workflowModel.setWorkflowState(WorkflowState.SEARCHING)
-                } else {
-//                    workflowModel.setWorkflowState(WorkflowState.DETECTED)
-//                    workflowModel.detectedBarcode.setValue(barcodeInCenter)
-                }
-            }
+            val loadingAnimator = createLoadingAnimator(graphicOverlay)
+            loadingAnimator.start()
+            graphicOverlay.add(BarcodeLoadingGraphic(graphicOverlay, loadingAnimator))
         }
         graphicOverlay.invalidate()
     }
 
     private fun createLoadingAnimator(graphicOverlay: GraphicOverlay): ValueAnimator {
-        val endProgress = 1.1f
+        val endProgress = 1f
         return ValueAnimator.ofFloat(0f, endProgress).apply {
+            repeatCount= ValueAnimator.INFINITE
             duration = 2000
             addUpdateListener {
                 if ((animatedValue as Float).compareTo(endProgress) >= 0) {
                     graphicOverlay.clear()
-//                    workflowModel.setWorkflowState(WorkflowState.SEARCHED)
-//                    workflowModel.detectedBarcode.setValue(barcode)
                 } else {
                     graphicOverlay.invalidate()
                 }
@@ -244,29 +196,5 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    fun getProgressToMeetBarcodeSizeRequirement(overlay: GraphicOverlay, barcode: Barcode): Float {
-        val context = overlay.context
-        return if (false) {
-            val reticleBoxWidth = getBarcodeReticleBox(overlay).width()
-            val barcodeWidth = overlay.translateX(barcode.boundingBox?.width()?.toFloat() ?: 0f)
-            val requiredWidth =
-                reticleBoxWidth * 50 / 100
-            (barcodeWidth / requiredWidth).coerceAtMost(1f)
-        } else {
-            1f
-        }
-    }
 
-    fun getBarcodeReticleBox(overlay: GraphicOverlay): RectF {
-        val context = overlay.context
-        val overlayWidth = overlay.width.toFloat()
-        val overlayHeight = overlay.height.toFloat()
-        val boxWidth =
-            overlayWidth * 80/ 100
-        val boxHeight =
-            overlayHeight * 35 / 100
-        val cx = overlayWidth / 2
-        val cy = overlayHeight / 2
-        return RectF(cx - boxWidth / 2, cy - boxHeight / 2, cx + boxWidth / 2, cy + boxHeight / 2)
-    }
 }
